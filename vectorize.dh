@@ -1,0 +1,112 @@
+include "std/img"
+include "std/io"
+include "std/drw"
+include "std/geom"
+include "std/arr"
+include "std/list"
+include "std/exch"
+include "std/str"
+include "std/dict"
+include "std/sys"
+include "std/math"
+
+hz := (exch.decode[exch.JSON](str.decode(io.read_file("codepoints.json"),'utf-8')).data as list[exch.JSON]).map(func (x:exch.JSON):i32{
+  return x.data as f32 as i32
+})
+
+func draw_polys(polys:list[list[vec[f32,2]]]){
+  drw.begin_shape();
+  for (i := 0; i < polys.length(); i++){
+    for (j := 0; j < polys[i].length(); j++){
+      drw.vertex(...polys[i][j].xy);
+    }
+    drw.next_contour(0);
+  }
+  drw.end_shape();
+  for (i := 0; i < polys.length(); i++){
+    for (j := 0; j < polys[i].length(); j++){
+      drw.circle(...polys[i][j].xy,2);
+    }
+  }
+}
+
+func poly_area(poly:list[vec[f32,2]]):f32{
+  a := 0.0;
+  n := poly.length();
+  for(p:=0;p<n;p++) {
+    q := (p+1)%n;
+    a += poly[p][0] * poly[q][1] - poly[q][0] * poly[p][1];
+  }
+  return a * 0.5;
+}
+
+
+// drw.size(1024,1536)
+
+func proc(idx:i32){
+  // io.println(idx);
+  fid := (idx as str).pad(5,"0",str.LEADING);
+  pixels := img.decode(io.read_file("render/%{fid}.png"));
+  layer := arr.make(pixels.shape().xy,0 as u8)
+  for (i := 0; i < pixels.shape()[0]; i++){
+    for (j := 0; j < pixels.shape()[1]; j++){
+      r := (pixels[i,j,0] as f32)/255.0;
+      if (r < 0.75){
+        layer[i,j] = 1;
+      }
+    }
+  }
+
+  contours := img.find_contours(layer)
+
+  for (i := 0; i < contours.length(); i++){
+    contours[i] = geom.poly_simplify(contours[i],0.75);
+  }
+
+  for (k := contours.length()-1; k>=0; k--){
+    bad := 0;
+    if (math.abs(poly_area(contours[k]))<1000){
+      for (l := 0; l < contours[k].length(); l++){
+        if (contours[k][l].x < 64) bad = 1;
+        if (contours[k][l].y < 64) bad = 1;
+        if (contours[k][l].x > 960) bad = 1;
+        if (contours[k][l].y > 960) bad = 1;
+      }
+    }
+    if (bad){
+      contours.erase(k,k+1);
+      continue;
+    }
+  }
+
+  // for(i:=0;i<500;i++){
+  //   draw_polys(contours)
+  //   e := drw.poll();
+  //   if (e.type==win.KEY_PRESSED&&e.key==' '){
+  //     break;
+  //   }
+  // }
+
+
+  Jk := exch.JSON{data:list[exch.JSON]{}};
+  for (i := 0; i < contours.length(); i++){
+    Jki := exch.JSON{data:list[exch.JSON]{}};
+    for (j := 0; j < contours[i].length(); j++){
+      (Jki.data as list[exch.JSON]).push(exch.JSON{data:list[exch.JSON]{
+        exch.JSON{data:contours[i][j].x},
+        exch.JSON{data:contours[i][j].y},
+      }});
+    }
+    (Jk.data as list[exch.JSON]).push(Jki);
+  }
+
+  io.write_file("contours/%{fid}.json",str.encode(exch.encode[exch.JSON](Jk),"utf-8"));
+}
+
+for (i:=0;i<hz.length();i++){
+  if (i % 100 == 0){
+    io.println("%{i}/%{hz.length()}");
+  }
+  proc(hz[i]);
+  sys.gc();
+}

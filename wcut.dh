@@ -1,0 +1,238 @@
+include "std/rand"
+include "std/geom"
+include "std/math"
+include "std/list"
+include "std/vec"
+include "std/io"
+include "std/drw"
+include "std/time"
+include "std/font"
+include "std/img"
+include "std/arr"
+include "std/str"
+include "std/sys"
+include "std/exch"
+
+action := sys.argv()[0];
+DO_ANIM := 0;
+DO_WRITE := 0;
+if (action == "show"){
+  DO_ANIM = 1;
+}else if (action == "dump"){
+  DO_WRITE = 1;
+}else if (action == "showdump"){
+  DO_ANIM = 1;
+  DO_WRITE = 1;
+}
+
+pth_cfg := sys.argv()[1];
+txt_cfg := str.decode(io.read_file(pth_cfg),"utf-8");
+cfg := (exch.decode[exch.JSON](txt_cfg)).data as dict[str,exch.JSON];
+
+INVERT      := cfg["invert"     ].data as f32 as i32;
+N_SAMP      := cfg["n_samp"     ].data as f32 as i32;
+V_CLEAR_MIN := cfg["v_clear_min"].data as f32;
+V_CLEAR_MAX := cfg["v_clear_max"].data as f32;
+MIN_LEN_CUT := cfg["min_len_cut"].data as f32;
+MAX_LEN_CUT := cfg["max_len_cut"].data as f32;
+W_CUT       := cfg["w_cut"      ].data as f32;
+
+
+codes := (exch.decode[exch.JSON](str.decode(io.read_file("codepoints.json"),'utf-8')).data as list[exch.JSON]).map(func (x:exch.JSON):i32{
+  return x.data as f32 as i32
+})
+// io.println(codes)
+
+W := 1024
+H := 1024
+
+drw.size(W,H);
+pg := drw.create_graphics(W,H);
+
+bytes := io.read_file("SourceHanSerifK-Heavy.ttf")
+tf := font.decode(bytes);
+
+
+func poisson_sample(n:i32):list[vec[f32,2]]{
+  ps := list[vec[f32,2]]{};
+  for (i := 0; i < n; i++){
+    dM := 0.0;
+    pM := {0.0,0.0}
+    for (j := 0; j < 10; j++){
+      p := rand.random({0.0,0.0},{W,H});
+      d := math.INF;
+      for (k := 0; k < ps.length(); k++){
+        d <?= (p - ps[k]).mag();
+      }
+      if (d > dM){
+        dM = d;
+        pM = p;
+      }
+    }
+    ps.push(pM);
+  }
+  return ps;
+}
+
+func sample_bilinear(dt:arr[f32,2],o:vec[f32,2]):f32{
+  if (o.x < 0.0) return 0;
+  if (o.x >= W-1) return 0;
+  if (o.y < 0.0) return 0;
+  if (o.y >= H-1) return 0;
+  x0 := o.x as i32;
+  x1 := math.ceil(o.x) as i32;
+  y0 := o.y as i32;
+  y1 := math.ceil(o.y) as i32;
+  xf := o.x - x0;
+  yf := o.y - y0;
+
+  z0 := dt[y0,x0];
+  z1 := dt[y0,x1];
+  z2 := dt[y1,x0];
+  z3 := dt[y1,x1];
+
+  return (z0 * (1-xf) + z1 * xf) * (1-yf) +(z2 * (1-xf) + z3 * xf) * yf;
+}
+
+func ray_march(dt:arr[f32,2],o:vec[f32,2],d:vec[f32,2]):f32{
+  t := 0.0;
+  for (i := 0; i < 10; i++){
+    p := o + d * t;
+    sd := sample_bilinear(dt,p);
+    t += sd;
+    if (sd < 0.0001){
+      break;
+    }
+  }
+  return t;
+}
+
+func proc(unic:i32){
+
+  gly := tf.glyph(tf.lookup(unic,font.FEAT_NONE),16);
+
+  for (i := 0; i < gly.length(); i++){
+    for (j := 0; j < gly[i].length(); j++){
+      gly[i][j] = gly[i][j]*800.0 + {150.0,800.0};
+    }
+  }
+
+  pg.begin();
+  drw.background(INVERT);
+  drw.stroke_weight(1);
+  drw.stroke(1-INVERT);
+  drw.fill(1-INVERT);
+  drw.begin_shape();
+  for (i := 0; i < gly.length(); i++){
+    for (j := 0; j < gly[i].length(); j++){
+      drw.vertex(...gly[i][j]);
+    }
+    drw.next_contour(1);
+  }
+  drw.end_shape(1);
+  drw.no_fill();
+  // drw.stroke_weight(64);
+  // drw.rect(0,0,W,H);
+  pg.end();
+
+  src := pg.read_pixels();
+  gray := img.convert[u8,3,u8,2](src,img.COLOR_RGB_GRAY);
+  ginv := img.convert[u8,2,u8,2](gray,img.COLOR_INVERT);
+  img.threshold(gray, 64, img.THRESH_BINARY);
+  img.threshold(ginv, 64, img.THRESH_BINARY);
+  dt  := img.dist_transform(gray, img.NORM_L2);
+  ndt := img.dist_transform(ginv, img.NORM_L2);
+
+  krnx := arr[f32,2]{-3,0,3; -10,0,10; -3,0,3;};
+  edgx := img.convolve(dt, krnx, img.BORDER_COPY);
+  krny := arr[f32,2]{-3,-10,-3; 0,0,0; 3,10,3;};
+  edgy := img.convolve(dt, krny, img.BORDER_COPY);
+
+  if (DO_ANIM){
+    vis := arr.make({H,W,4},0.0);
+    for (i := 0; i < dt.shape()[0]; i++){
+      for (j := 0; j < dt.shape()[1]; j++){
+        vis[i,j,0]=edgx[i,j]*0.01+0.5;
+        vis[i,j,1]=edgy[i,j]*0.01+0.5;
+        vis[i,j,2]=dt[i,j]*0.001;
+        vis[i,j,3]=1.0;
+      }
+    }
+    img.convert(vis,img.COLOR_COPY,src);
+    pg.write_pixels(src);
+    drw.background(0);
+    pg.draw(0,0);
+    for (i := 0; i < 200; i++) drw.poll();
+  }
+
+  pg.begin();
+  drw.background(0);
+  drw.fill(1.0);
+  drw.stroke(1,0,0);
+  drw.no_stroke();
+  pg.end();
+
+  ps := poisson_sample(N_SAMP);
+  pg.begin();
+  for (i := 0; i < ps.length(); i++) {
+    x := ps[i].x as i32
+    y := ps[i].y as i32
+    z := dt[y,x];
+    if (z==0) continue;
+    dx := 0.0;
+    dy := 1.0;
+    if (rand.random(V_CLEAR_MIN,V_CLEAR_MAX)>z){
+      dx =-edgy[y,x];
+      dy = edgx[y,x];
+    }
+    dl := ({dx,dy}).mag();
+    if (dl <= 0.001){
+      dx = 0.0;
+      dy = 1.0;
+    }else{
+      dx /= dl;
+      dy /= dl;
+    }
+    l0 := ray_march(dt,{x,y},({dx,dy}));
+    l1 := ray_march(dt,{x,y},({-dx,-dy}));
+    l := math.min(l0,l1);
+
+    l >?= MIN_LEN_CUT;
+    l <?= MAX_LEN_CUT;
+
+    drw.push_matrix();
+    drw.translate(x, y);
+    drw.rotate_deg(math.atan2(dy,dx)*180/math.PI)
+    drw.ellipse(0, 0, l*2, W_CUT);
+    drw.pop_matrix();
+    
+    if (DO_ANIM){
+      pg.end();
+      pg.draw(0,0);
+      drw.poll();
+      pg.begin();
+    }
+  }
+  pg.end();
+
+
+}
+
+for (frame := 0; frame < codes.length(); frame++){
+  // drw.background(0);
+  polys := proc(codes[frame])
+  for (i := 0; i < 1+DO_ANIM*199; i++){
+    pg.draw(0,0);
+    drw.poll();
+  }
+  if (frame % 100 == 0){
+    io.println("%{frame}/%{codes.length()}")
+  }
+  if (DO_WRITE){
+    pix := pg.read_pixels()
+    if (INVERT){
+      img.convert(pix,img.COLOR_INVERT,pix);
+    }
+    io.write_file("render/%{(codes[frame] as str).pad(5,"0",str.LEADING)}.png",img.encode("png",pix))
+  }
+}

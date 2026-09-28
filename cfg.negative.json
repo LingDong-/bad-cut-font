@@ -1,0 +1,9 @@
+{
+  "invert"      :1,
+  "n_samp"      :1200,
+  "v_clear_min" :0,
+  "v_clear_max" :200,
+  "min_len_cut" :40,
+  "max_len_cut" :160,
+  "w_cut"       :15
+}
